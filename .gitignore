@@ -1,0 +1,6 @@
+__pycache__/
+.DS_Store
+# Exclude assignment PDF but keep our report PDF
+Project*.pdf
+!report.pdf
+.venv/

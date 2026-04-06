@@ -1,0 +1,12 @@
+shiny>=1.0
+shinywidgets>=0.3
+shinyswatch>=0.7
+plotly>=5.0
+pandas>=1.5
+numpy>=1.20
+scikit-learn>=1.0
+statsmodels>=0.13
+scipy>=1.7
+openpyxl>=3.0
+pyreadr>=0.5
+seaborn>=0.13
