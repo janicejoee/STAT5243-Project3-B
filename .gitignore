@@ -4,3 +4,5 @@ __pycache__/
 Project*.pdf
 !report.pdf
 .venv/
+rsconnect-python/
+runtime.txt

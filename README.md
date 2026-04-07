@@ -1,8 +1,8 @@
 ## Overview
 
-An interactive, code-free data workbench built with **Shiny for Python**. Users can load, clean, transform, and explore tabular datasets entirely in the browser. The app is organized into six tabs — **Guide**, **Load**, **Overview**, **Cleaning**, **Feature Engineering**, and **EDA** — with a polished Lux Bootstrap theme, per-tab dataset pickers, user instruction cards, and a full dataset version history.
+An interactive, code-free data workbench built with **Shiny for Python**. Users can load, clean, transform, and explore tabular datasets entirely in the browser. The app is organized into guided stages — **Load** (with embedded Overview), **Cleaning**, **Feature Engineering** — plus always-available **EDA**, with a polished Lux Bootstrap theme, per-tab dataset pickers, guided instruction popups, and a full dataset version history.
 
-The tabs are **not** strictly sequential. Overview and EDA can be visited at any point to support cleaning and feature-engineering decisions. The workflow is flexible by design.
+The primary workflow is guided by **Back/Next** navigation controls. **EDA** remains accessible at any point via a dedicated quick-access button.
 
 All computation runs locally through pure Python module imports. There is no Flask, no REST API, and no external backend — user data never leaves the machine.
 
@@ -35,12 +35,23 @@ All computation runs locally through pure Python module imports. There is no Fla
 
 ### 2. Overview (new)
 
-A quick decision-support summary shown between Load and Cleaning, designed to inform cleaning and feature-engineering choices before diving in:
+A quick decision-support summary embedded in the **Load** tab, designed to inform cleaning and feature-engineering choices before diving in:
 
 - **Missing Value Overview** — table of columns with missing values, counts, and percentages
 - **Duplicate Overview** — count of fully duplicate rows with example rows; "No duplicate detected" if none
 - **Scale Review** — min, max, and mean for every numeric column in tabular form
 - Reminder that EDA provides in-depth analysis and can be consulted at any time
+
+### 2B. Version B (A/B Test UX Flow)
+
+Version B adds guidance-focused UX behavior while keeping all transformation logic unchanged:
+
+- **Auto-advance after load:** successful dataset load/upload stays on `Load` and surfaces the embedded overview with a readiness banner.
+- **Active recommendation card in Load overview:** prioritizes next actions using deterministic rules (missing values, then duplicates, then scale signals) with direct CTA links.
+- **Step tracker in header:** non-blocking progress indicator for the linear pipeline (Load, Cleaning, Feature Engineering); EDA is separate and opened via **Open EDA**.
+- **Contextual unlock messaging:** Feature Engineering remains accessible pre-cleaning but shows a soft warning and quick navigation to Cleaning.
+- **Inline "What's next?" prompts after cleaning apply:** action-aware suggestions with direct links to related tabs.
+- **EDA contextual framing:** EDA banner distinguishes raw-data exploration (pre-cleaning) from cleaned-data validation (post-cleaning).
 
 ### 3. Data Cleaning and Preprocessing
 
@@ -49,7 +60,7 @@ A quick decision-support summary shown between Load and Cleaning, designed to in
 - **Drop Rows/Cols fix:** now requires at least one column to be selected — prevents accidentally dropping rows across all columns
 - **Single column selector** for outlier handling is hidden for all other actions, eliminating ambiguity
 - **Per-tab dataset picker:** choose which saved version to clean from the sidebar, independently of the Load tab
-- **User instruction card** at the top of the Cleaning tab with EDA/Overview cross-references
+- **Guided popup instructions** when entering Cleaning, with EDA/Load-overview cross-references
 - **Default save mode** is "Apply to current version" (overwrite in place); switch to "Save as derived version" to branch a new named copy
 - **Preview-then-apply workflow** with before/after comparison charts
 
@@ -58,13 +69,13 @@ A quick decision-support summary shown between Load and Cleaning, designed to in
 - **12 transforms:** log (log1p), square, cube, interaction (col1 × col2), ratio (col1 / col2), binning, one-hot encoding, standardize (z-score), normalize (min-max), fill NA, drop NA, **custom algebraic expression (new)**
 - **Custom New Column:** enter any pandas-eval expression (e.g., `(price - cost) / price`) to create a new column; errors for non-existent columns or invalid syntax are reported immediately
 - **Per-tab dataset picker:** choose which saved version to transform
-- **User instruction card** with EDA cross-references
+- **Guided popup instructions** when entering Feature Engineering, with EDA cross-references
 - **Descriptive version names:** derived datasets are named to encode the operation — e.g., `log_Age_01`, `expr_margin_01`
 
 ### 5. Exploratory Data Analysis (EDA)
 
 - **Per-tab dataset picker:** choose which version to analyze for each operation independently
-- **User instruction card** reminding users that EDA is useful at every stage, not just after cleaning
+- **Guided popup instructions** when entering EDA, emphasizing stage-aware usage
 - **Summary tables:**
   - Data preview (adjustable row count)
   - **Describe — Numeric:** count, mean, std, min, 25 %, 50 %, 75 %, max (numeric columns only)
@@ -104,7 +115,7 @@ Derived datasets are named to encode the operation performed, making it easy to 
 ### 8. UI/UX
 
 - **Lux Bootstrap theme** (shinyswatch) with custom CSS — gradient metric cards, instruction boxes, tip boxes
-- **User instruction cards** on Cleaning, Feature Engineering, and EDA tabs with cross-tab references
+- **Contextual guided popups** on Load, Cleaning, Feature Engineering, and EDA tabs
 - **20+ tooltips** throughout
 - **Sidebar layouts** in Cleaning and Feature Engineering (collapsible on mobile)
 - **Full-screen expandable cards** for all plots and tables

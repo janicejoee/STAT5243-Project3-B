@@ -103,15 +103,25 @@ def register_dataset_version(
     label: str,
     source_key: str | None = None,
     transform: str | None = None,
+    apply_kind: str | None = None,
 ) -> tuple[OrderedDict[str, dict[str, Any]], str]:
     key = next_dataset_key(datasets, prefix)
     new_datasets = OrderedDict(datasets)
+    parent = new_datasets.get(source_key) if source_key else None
+    cleaning_applied = bool(parent.get("cleaning_applied")) if parent else False
+    feature_engineering_applied = bool(parent.get("feature_engineering_applied")) if parent else False
+    if apply_kind == "cleaning":
+        cleaning_applied = True
+    elif apply_kind == "feature":
+        feature_engineering_applied = True
     new_datasets[key] = {
         "label": label,
         "df": df.copy(),
         "source_key": source_key,
         "transform": transform,
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "cleaning_applied": cleaning_applied,
+        "feature_engineering_applied": feature_engineering_applied,
     }
     return new_datasets, key
 
@@ -122,11 +132,27 @@ def overwrite_dataset_version(
     df: pd.DataFrame,
     *,
     transform: str | None = None,
+    apply_kind: str | None = None,
 ) -> OrderedDict[str, dict[str, Any]]:
     new_datasets = OrderedDict(datasets)
     record = dict(new_datasets[key])
     record["df"] = df.copy()
-    record["transform"] = transform
+    # Append so stage inference (keywords in `transform`) still sees prior cleaning / steps
+    # when the user applies multiple "current version" operations on the same key.
+    prev = (record.get("transform") or "").strip()
+    new_t = (transform or "").strip()
+    if prev and new_t:
+        record["transform"] = f"{prev} | {new_t}"
+    else:
+        record["transform"] = new_t or prev
+    cleaning_applied = bool(record.get("cleaning_applied"))
+    feature_engineering_applied = bool(record.get("feature_engineering_applied"))
+    if apply_kind == "cleaning":
+        cleaning_applied = True
+    elif apply_kind == "feature":
+        feature_engineering_applied = True
+    record["cleaning_applied"] = cleaning_applied
+    record["feature_engineering_applied"] = feature_engineering_applied
     record["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     new_datasets[key] = record
     return new_datasets
@@ -167,12 +193,16 @@ def infer_stage_flags_for_record(
     source_key = str(record.get("source_key") or "").lower()
 
     is_loaded = True
+    explicit_clean = bool(record.get("cleaning_applied"))
+    explicit_feature = bool(record.get("feature_engineering_applied"))
     is_cleaned = (
-        key_l.startswith("cleaned_")
+        explicit_clean
+        or key_l.startswith("cleaned_")
         or _text_has_any_keyword(transform, (
             "handle_missing",
             "knn_impute",
             "remove_duplicate",
+            "duplicate rows",  # remove_duplicates summary: "Found N duplicate rows ..."
             "scale_",
             "encode_",
             "outlier",
@@ -183,7 +213,8 @@ def infer_stage_flags_for_record(
         or source_key.startswith("cleaned_")
     )
     is_feature_engineered = (
-        key_l.startswith("feature_")
+        explicit_feature
+        or key_l.startswith("feature_")
         or _text_has_any_keyword(transform, (
             "feature",
             "interaction",
@@ -607,6 +638,76 @@ APP_CSS = """
   margin-bottom: 14px;
   font-size: 0.92rem;
 }
+.workflow-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 0 12px 8px 12px;
+}
+.workflow-header-bar .step-tracker {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.step-tracker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0;
+}
+.step-pill {
+  border: 1px solid #ced4da;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 0.82rem;
+  background: #f8f9fa;
+  color: #6c757d;
+}
+.step-pill.current {
+  border-color: #4361ee;
+  color: #1f3fbf;
+  background: #eef2ff;
+  font-weight: 700;
+}
+.step-pill.done {
+  border-color: #198754;
+  color: #146c43;
+  background: #e9f7ef;
+}
+.workflow-top-right {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  flex-shrink: 0;
+}
+.workflow-footer-wrap {
+  width: 100%;
+  margin-top: auto;
+  padding: 0;
+  background: #f8f9fa;
+  border-top: 1px solid #dee2e6;
+}
+.workflow-bottom-nav {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  max-width: 720px;
+  margin: 0 auto;
+}
+.workflow-bottom-nav .btn {
+  min-width: 100px;
+}
+/* Hide default page_navbar tab strip only; custom header keeps step pills + Open EDA */
+.bslib-page-nav > nav .nav,
+.bslib-page-nav > nav > ul.nav,
+.navbar .navbar-nav,
+.navbar-nav,
+.nav-underline {
+  display: none !important;
+}
 """
 
 
@@ -614,118 +715,6 @@ APP_CSS = """
 # UI
 # ---------------------------------------------------------------------------
 app_ui = ui.page_navbar(
-    # ── Guide Tab ──────────────────────────────────────────────────────────
-    ui.nav_panel(
-        "Guide",
-        ui.layout_columns(
-            ui.card(
-                ui.card_header(ui.strong("Welcome")),
-                ui.p(
-                    "This is an interactive data workbench built with Shiny for Python. "
-                    "Load, clean, transform, and explore datasets in the browser — no coding "
-                    "required. All computation runs locally through pure Python modules."
-                )
-            ),
-            col_widths=[12],
-        ),
-        ui.card(
-            ui.card_header(ui.strong("Tab Overview")),
-            ui.div(
-                {"class": "tip-box"},
-                ui.strong("Important: "),
-                "The tabs are ",
-                ui.strong("not strictly sequential."),
-                " You can (and should) jump to EDA or Overview at any point to assist "
-                "decision-making for Cleaning or Feature Engineering. Think of the tabs as "
-                "a toolbox, not a rigid pipeline.",
-            ),
-            ui.tags.ol(
-                ui.tags.li(
-                    ui.strong("Load "),
-                    "— Upload a CSV/Excel/JSON/RDS file or load a built-in dataset. "
-                    "If you load more than one dataset you will be asked to choose one to proceed with."
-                ),
-                ui.tags.li(
-                    ui.strong("Overview "),
-                    "— Quick decision-support summary: missing-value counts per column, "
-                    "duplicate-row analysis, and numeric scale ranges (min/max/mean). "
-                    "Use this before Cleaning and Feature Engineering to identify what "
-                    "needs attention.",
-                ),
-                ui.tags.li(
-                    ui.strong("Cleaning "),
-                    "— Handle missing values (including k-NN imputation), remove duplicates, "
-                    "scale or encode columns, handle outliers, standardize text, and coerce types. "
-                    "Each operation offers a preview before applying.",
-                ),
-                ui.tags.li(
-                    ui.strong("Feature Engineering "),
-                    "— Apply 12 transforms (log, square, cube, interaction, ratio, binning, "
-                    "one-hot, standardize, normalize, fill NA, drop NA, and custom algebraic "
-                    "expressions). Before/after comparison charts are shown.",
-                ),
-                ui.tags.li(
-                    ui.strong("EDA "),
-                    "— In-depth statistical exploration: filter the data, inspect summary "
-                    "statistics split by type (numeric vs. categorical), create 1D/2D plots, "
-                    "run regression analysis, compare multiline distributions, and generate a "
-                    "correlation matrix. EDA is equally useful before, during, and after "
-                    "cleaning and feature engineering.",
-                ),
-            ),
-        ),
-        ui.card(
-            ui.card_header(ui.strong("Overview vs. EDA")),
-            ui.p(
-                "Overview and EDA have ", ui.strong("partially overlapping"),
-                " functionality. Overview is designed as a ",
-                ui.em("quick, pre-cleaning decision guide"),
-                " — a snapshot to inform what operations to apply. EDA provides ",
-                ui.em("detailed, in-depth statistical studies"),
-                " with interactive plots, regression, and correlation analysis. "
-                "When you need richer context for a cleaning or feature-engineering decision, "
-                "switch to EDA at any time.",
-            ),
-        ),
-        ui.card(
-            ui.card_header(ui.strong("Tips")),
-            ui.div(
-                {"class": "tip-box"},
-                ui.strong("Dataset Picker (per tab): "),
-                "Every tab (Cleaning, Feature Engineering, EDA) has its own dataset picker "
-                "so you can apply operations to any saved version independently.",
-            ),
-            ui.div(
-                {"class": "tip-box"},
-                ui.strong("Descriptive Version Names: "),
-                "Saved derived datasets are named to encode what was done — e.g., ",
-                ui.tags.code("knn_Age_01"),
-                " for a k-NN imputed version of the Age column. "
-                "The full history is always visible in the Load tab.",
-            ),
-            ui.div(
-                {"class": "tip-box"},
-                ui.strong("Filter Syntax: "),
-                "Use pandas query expressions. Wrap each condition in parentheses before "
-                "combining: ",
-                ui.tags.code('(col_cat == "sex") & (col_num >= 5)'),
-                ". Use ",
-                ui.tags.code("=="),
-                " for equality, ",
-                ui.tags.code("&"),
-                " / ",
-                ui.tags.code("|"),
-                " for AND/OR, and backticks for column names with spaces.",
-            ),
-            ui.div(
-                {"class": "tip-box"},
-                ui.strong("Preview First: "),
-                "Cleaning and Feature Engineering both have a Preview button. "
-                "Always preview before applying.",
-            ),
-        ),
-    ),
-
     # ── Load Tab ───────────────────────────────────────────────────────────
     ui.nav_panel(
         "Load",
@@ -773,37 +762,8 @@ app_ui = ui.page_navbar(
             ),
             col_widths=[4, 8],
         ),
-    ),
-
-    # ── Overview Tab ───────────────────────────────────────────────────────
-    ui.nav_panel(
-        "Overview",
         ui.output_ui("overview_ready_banner"),
-        ui.card(
-            ui.card_header(ui.strong("How to Use Overview")),
-            ui.div(
-                {"class": "instr-box"},
-                ui.tags.ul(
-                    ui.tags.li(
-                        "Overview provides a ",
-                        ui.strong("quick, at-a-glance summary"),
-                        " of the active dataset to guide Cleaning and Feature Engineering decisions.",
-                    ),
-                    ui.tags.li(
-                        "For ",
-                        ui.strong("in-depth statistical analysis"),
-                        " — interactive plots, regression, correlation — use the ",
-                        ui.strong("EDA tab"),
-                        ". EDA can be opened at any time to support decision-making.",
-                    ),
-                    ui.tags.li(
-                        "Switch the active dataset in the ",
-                        ui.strong("Load tab"),
-                        " to compare Overview summaries for different versions.",
-                    ),
-                ),
-            ),
-        ),
+        ui.output_ui("overview_priority_recommendation"),
         ui.layout_columns(
             ui.card(
                 ui.card_header(ui.strong("Missing Value Overview")),
@@ -827,6 +787,7 @@ app_ui = ui.page_navbar(
     # ── Cleaning Tab ───────────────────────────────────────────────────────
     ui.nav_panel(
         "Cleaning",
+        ui.output_ui("cleaning_context_banner"),
         ui.layout_sidebar(
             ui.sidebar(
                 ui.h6("Cleaning / Preprocessing", class_="text-uppercase fw-bold"),
@@ -970,46 +931,8 @@ app_ui = ui.page_navbar(
                     col_widths=[6, 6],
                 ),
                 ui.output_ui("cleaning_result_summary"),
+                ui.output_ui("cleaning_whats_next"),
                 width="380px",
-            ),
-            ui.card(
-                ui.card_header(ui.strong("How to Use Cleaning")),
-                ui.div(
-                    {"class": "instr-box"},
-                    ui.tags.ul(
-                        ui.tags.li(
-                            "Select a ",
-                            ui.strong("dataset to clean"),
-                            " from the sidebar picker, then choose an ",
-                            ui.strong("Action"),
-                            " and the relevant columns.",
-                        ),
-                        ui.tags.li(
-                            "Always click ",
-                            ui.strong("Preview"),
-                            " first to inspect the before/after comparison chart and "
-                            "the row count impact before committing.",
-                        ),
-                        ui.tags.li(
-                            "For missing-value decisions, use the ",
-                            ui.strong("Overview tab"),
-                            " to see which columns have NAs and their percentages.",
-                        ),
-                        ui.tags.li(
-                            "For outlier decisions, use ",
-                            ui.strong("EDA → 1D Plot"),
-                            " (histogram/box) and ",
-                            ui.strong("Scale Review"),
-                            " in Overview to quantify column ranges.",
-                        ),
-                        ui.tags.li(
-                            ui.strong("k-NN imputation"),
-                            " is the default for missing values. It uses other numeric "
-                            "columns to estimate missing values; the description in the "
-                            "sidebar explains the feature-selection logic.",
-                        ),
-                    ),
-                ),
             ),
             ui.card(
                 ui.card_header(ui.strong("Cleaning Preview")),
@@ -1028,6 +951,7 @@ app_ui = ui.page_navbar(
     # ── Feature Engineering Tab ────────────────────────────────────────────
     ui.nav_panel(
         "Feature Engineering",
+        ui.output_ui("feature_unlock_banner"),
         ui.layout_sidebar(
             ui.sidebar(
                 ui.h6("Feature Engineering", class_="text-uppercase fw-bold"),
@@ -1129,37 +1053,6 @@ app_ui = ui.page_navbar(
                 width="380px",
             ),
             ui.card(
-                ui.card_header(ui.strong("How to Use Feature Engineering")),
-                ui.div(
-                    {"class": "instr-box"},
-                    ui.tags.ul(
-                        ui.tags.li(
-                            "Select a ",
-                            ui.strong("dataset to transform"),
-                            " from the sidebar picker, choose a ",
-                            ui.strong("Method"),
-                            ", and configure the parameters.",
-                        ),
-                        ui.tags.li(
-                            "Preview the transformation before applying — the before/after "
-                            "comparison chart shows the distribution change.",
-                        ),
-                        ui.tags.li(
-                            "Use ",
-                            ui.strong("EDA → 1D Plot"),
-                            " to examine column distributions and decide on appropriate "
-                            "transforms (e.g., check skewness before applying log transform).",
-                        ),
-                        ui.tags.li(
-                            "Use ",
-                            ui.strong("Custom New Column"),
-                            " for any algebraic combination not covered by the built-in "
-                            "methods — enter any pandas-eval expression.",
-                        ),
-                    ),
-                ),
-            ),
-            ui.card(
                 ui.card_header(ui.strong("Feature Preview")),
                 ui.output_data_frame("feature_preview_table"),
                 ui.download_button("download_featured", "Download Feature Preview (CSV)",
@@ -1176,48 +1069,7 @@ app_ui = ui.page_navbar(
     # ── EDA Tab ────────────────────────────────────────────────────────────
     ui.nav_panel(
         "EDA",
-        ui.card(
-            ui.card_header(ui.strong("How to Use EDA")),
-            ui.div(
-                {"class": "instr-box"},
-                ui.tags.ul(
-                    ui.tags.li(
-                        "Select a dataset from the picker below. EDA is not only for final "
-                        "analysis — it is a ",
-                        ui.strong("powerful aid for cleaning and feature-engineering decisions"),
-                        " at any stage.",
-                    ),
-                    ui.tags.li(
-                        ui.strong("Filter"),
-                        ": apply a pandas query to subset rows. Wrap each condition in "
-                        "parentheses before combining: ",
-                        ui.tags.code('(col_cat == "val") & (col_num >= 5)'),
-                        ".",
-                    ),
-                    ui.tags.li(
-                        ui.strong("Describe"),
-                        ": numeric and categorical statistics shown in separate tables.",
-                    ),
-                    ui.tags.li(
-                        ui.strong("1D / 2D Plot"),
-                        ": visualize distributions and relationships; "
-                        "useful for outlier detection and transform decisions.",
-                    ),
-                    ui.tags.li(
-                        ui.strong("Regression"),
-                        ": fit polynomial, robust, or LOWESS curves; see Pearson r and p-value.",
-                    ),
-                    ui.tags.li(
-                        ui.strong("Multiline"),
-                        ": compare distributions of a numeric column across categories.",
-                    ),
-                    ui.tags.li(
-                        ui.strong("Correlation Matrix"),
-                        ": Pearson, Spearman, or Kendall; useful before feature selection.",
-                    ),
-                ),
-            ),
-        ),
+        ui.output_ui("eda_context_banner"),
         ui.card(
             ui.card_header(ui.strong("Dataset")),
             ui.input_select("eda_df_picker", "Dataset to explore", {}),
@@ -1378,8 +1230,14 @@ app_ui = ui.page_navbar(
     header=ui.div(
         ui.busy_indicators.use(),
         ui.tags.style(APP_CSS),
+        ui.div(
+            {"class": "workflow-header-bar"},
+            ui.output_ui("workflow_step_tracker"),
+            ui.output_ui("workflow_top_right_control"),
+        ),
         ui.output_ui("message_stack"),
     ),
+    footer=ui.output_ui("workflow_bottom_nav"),
 )
 
 
@@ -1405,18 +1263,22 @@ def server(input, output, session):
     clean_comparison_fig = reactive.value(None)
     feature_comparison_fig = reactive.value(None)
     overview_ready_banner_state = reactive.value("")
+    overview_recommendation_target = reactive.value("Cleaning")
+    cleaning_next_steps_state = reactive.value([])
+    shown_instruction_tabs_state = reactive.value([])
+    last_non_eda_tab_state = reactive.value("Load")
 
     # Tracks whether a multi-source conflict modal is pending
     _conflict_pending = reactive.value(False)
 
     def push_message(level: str, text: str) -> None:
-        items = list(messages_state.get())
-        items.insert(0, {"level": level, "text": text})
-        messages_state.set(items[:8])
+        """Show one banner at a time; each new message replaces the previous."""
+        messages_state.set([{"level": level, "text": text}])
 
     def clear_previews() -> None:
         cleaning_preview_df.set(pd.DataFrame())
         cleaning_preview_meta.set("")
+        cleaning_next_steps_state.set([])
         feature_preview_df.set(pd.DataFrame())
         feature_preview_meta.set("")
 
@@ -1437,7 +1299,159 @@ def server(input, output, session):
 
     def _post_load_success(readiness_text: str) -> None:
         overview_ready_banner_state.set(readiness_text)
-        _select_main_tab("Overview")
+        _select_main_tab("Load")
+
+    def _show_tab_instruction_modal(tab_name: str) -> None:
+        modal_content: dict[str, tuple[str, list[str]]] = {
+            "Load": (
+                "Load + Overview Quick Start",
+                [
+                    "Load a built-in dataset or upload your own file first.",
+                    "Review the missing, duplicate, and scale summaries before cleaning.",
+                    "Use the recommendation card to jump to the next best step.",
+                ],
+            ),
+            "Cleaning": (
+                "Cleaning Quick Start",
+                [
+                    "Pick the dataset version to clean from the sidebar selector.",
+                    "Preview before apply whenever possible.",
+                    "Start with missing values or duplicates from the Load overview.",
+                ],
+            ),
+            "Feature Engineering": (
+                "Feature Engineering Quick Start",
+                [
+                    "Choose a dataset and method from the left sidebar.",
+                    "Preview the transformation before applying it.",
+                    "If data has not been cleaned yet, consider cleaning first.",
+                ],
+            ),
+            "EDA": (
+                "EDA Quick Start",
+                [
+                    "Use EDA at any stage, not just at the end.",
+                    "Start with Data Preview and Describe, then move to plots.",
+                    "Use the Correlation Matrix to validate post-cleaning changes.",
+                ],
+            ),
+        }
+        if tab_name not in modal_content:
+            return
+        title, bullets = modal_content[tab_name]
+        ui.modal_show(
+            ui.modal(
+                ui.tags.ul(*[ui.tags.li(line) for line in bullets]),
+                title=title,
+                easy_close=True,
+                footer=ui.modal_button("Got it"),
+            )
+        )
+
+    @reactive.effect
+    @reactive.event(input.main_nav)
+    def _show_guided_instructions():
+        if _conflict_pending.get():
+            return
+        tab_name = input.main_nav()
+        if not tab_name:
+            return
+        shown = list(shown_instruction_tabs_state.get())
+        if tab_name in shown:
+            return
+        if tab_name not in ("Load", "Cleaning", "Feature Engineering", "EDA"):
+            return
+        _show_tab_instruction_modal(tab_name)
+        shown.append(tab_name)
+        shown_instruction_tabs_state.set(shown)
+
+    @reactive.effect
+    @reactive.event(input.main_nav)
+    def _remember_last_non_eda_tab():
+        tab_name = input.main_nav()
+        if tab_name and tab_name != "EDA":
+            last_non_eda_tab_state.set(tab_name)
+
+    @reactive.effect
+    @reactive.event(input.workflow_open_eda_btn)
+    def _open_eda_from_guided_nav():
+        _select_main_tab("EDA")
+
+    @reactive.effect
+    @reactive.event(input.workflow_prev_btn)
+    def _go_prev_workflow_tab():
+        workflow_tabs = ["Load", "Cleaning", "Feature Engineering"]
+        current_tab = input.main_nav() or "Load"
+        if current_tab == "EDA":
+            _select_main_tab(last_non_eda_tab_state.get())
+            return
+        if current_tab not in workflow_tabs:
+            _select_main_tab("Load")
+            return
+        current_idx = workflow_tabs.index(current_tab)
+        if current_idx > 0:
+            _select_main_tab(workflow_tabs[current_idx - 1])
+
+    @reactive.effect
+    @reactive.event(input.workflow_next_btn)
+    def _go_next_workflow_tab():
+        workflow_tabs = ["Load", "Cleaning", "Feature Engineering"]
+        current_tab = input.main_nav() or "Load"
+        if current_tab == "EDA":
+            _select_main_tab(last_non_eda_tab_state.get())
+            return
+        if current_tab not in workflow_tabs:
+            _select_main_tab("Load")
+            return
+        current_idx = workflow_tabs.index(current_tab)
+        if current_idx < len(workflow_tabs) - 1:
+            _select_main_tab(workflow_tabs[current_idx + 1])
+        else:
+            push_message("info", "You are at the end of the guided workflow. Open EDA anytime.")
+
+    def _cleaning_next_steps(action: str) -> list[dict[str, str]]:
+        action_map: dict[str, list[dict[str, str]]] = {
+            "handle_missing": [
+                {"text": "Imputation complete. Check Correlation Matrix in EDA to validate shifted relationships.", "target": "EDA"},
+                {"text": "Review duplicate rows in Load before additional transforms.", "target": "Load"},
+                {"text": "Proceed to Feature Engineering once the data quality looks stable.", "target": "Feature Engineering"},
+            ],
+            "remove_duplicates": [
+                {"text": "Duplicates removed. Recheck missing-value percentages in Load.", "target": "Load"},
+                {"text": "Inspect distributions in EDA to confirm repeated patterns are gone.", "target": "EDA"},
+                {"text": "Continue with feature transforms after quality checks.", "target": "Feature Engineering"},
+            ],
+            "scale_columns": [
+                {"text": "Scaling applied. Validate transformed distributions in EDA 1D plots.", "target": "EDA"},
+                {"text": "If missingness remains, return to Cleaning before modeling features.", "target": "Cleaning"},
+                {"text": "Move to Feature Engineering for downstream transforms.", "target": "Feature Engineering"},
+            ],
+            "encode_columns": [
+                {"text": "Encoding complete. Verify output columns and cardinality in EDA.", "target": "EDA"},
+                {"text": "Review active dataset summary to confirm expected shape changes.", "target": "Load"},
+                {"text": "Continue into Feature Engineering for interactions or ratios.", "target": "Feature Engineering"},
+            ],
+            "handle_outliers": [
+                {"text": "Outlier handling complete. Compare before/after spread in EDA.", "target": "EDA"},
+                {"text": "Revisit Load scale review for updated ranges.", "target": "Load"},
+                {"text": "Proceed to Feature Engineering after confirming stability.", "target": "Feature Engineering"},
+            ],
+            "standardize_text": [
+                {"text": "Text standardization complete. Check categorical levels in EDA tables.", "target": "EDA"},
+                {"text": "If duplicates were caused by case/spacing, rerun duplicate check in Load.", "target": "Load"},
+                {"text": "Continue with encoding or feature transforms next.", "target": "Feature Engineering"},
+            ],
+            "coerce_types": [
+                {"text": "Type coercion complete. Validate column types in EDA.", "target": "EDA"},
+                {"text": "Re-evaluate missing values created by coercion in Load.", "target": "Load"},
+                {"text": "Proceed to feature creation once type checks pass.", "target": "Feature Engineering"},
+            ],
+        }
+        return action_map.get(action, [
+            {"text": "Cleaning operation applied successfully.", "target": "Cleaning"},
+            {"text": "Validate outcomes with EDA before the next step.", "target": "EDA"},
+            {"text": "Continue to Feature Engineering when ready.", "target": "Feature Engineering"},
+        ])
 
     # ── Core reactive calcs ─────────────────────────────────────────────
 
@@ -1760,7 +1774,11 @@ def server(input, output, session):
         elif action == "remove_duplicates":
             transformed = cleaning.remove_duplicates(df)
             n_dupes = len(df) - len(transformed)
-            return transformed, f"Found {n_dupes} duplicate rows out of {len(df)} total.", []
+            return (
+                transformed,
+                f"remove_duplicates: removed {n_dupes} duplicate rows ({len(transformed)}/{len(df)} rows kept).",
+                [],
+            )
 
         elif action == "scale_columns":
             columns = list(input.clean_columns() or [])
@@ -1828,20 +1846,25 @@ def server(input, output, session):
         label: str,
         transform: str,
         source_key: str | None = None,
+        apply_kind: str = "filter",
     ) -> str:
         datasets = datasets_state.get()
         src_key = source_key or active_key_state.get()
         if src_key is None:
             raise ValueError("No active dataset to update.")
         if mode == "current":
-            datasets_state.set(overwrite_dataset_version(datasets, src_key, transformed,
-                                                          transform=transform))
+            datasets_state.set(overwrite_dataset_version(
+                datasets, src_key, transformed,
+                transform=transform,
+                apply_kind=apply_kind,
+            ))
             active_key_state.set(src_key)
             return src_key
         datasets, key = register_dataset_version(
             datasets, transformed,
             prefix=prefix, label=label,
             source_key=src_key, transform=transform,
+            apply_kind=apply_kind,
         )
         datasets_state.set(datasets)
         active_key_state.set(key)
@@ -1929,9 +1952,11 @@ def server(input, output, session):
                 label=desc_label,
                 transform=summary,
                 source_key=src_key,
+                apply_kind="cleaning",
             )
             cleaning_preview_df.set(transformed.head(20))
             cleaning_preview_meta.set(summary)
+            cleaning_next_steps_state.set(_cleaning_next_steps(action))
             push_message("success", f"Cleaning applied → [{target_key}].")
         except Exception as exc:
             push_message("error", f"Cleaning apply failed: {exc}")
@@ -2053,6 +2078,7 @@ def server(input, output, session):
                 label=desc_label,
                 transform=summary,
                 source_key=src_key,
+                apply_kind="feature",
             )
             feature_preview_df.set(transformed.head(20))
             feature_preview_meta.set(summary)
@@ -2263,6 +2289,72 @@ def server(input, output, session):
 
     @output
     @render.ui
+    def workflow_step_tracker():
+        stage = current_stage_state()
+        try:
+            current_tab = input.main_nav()
+        except Exception:
+            current_tab = "Load"
+
+        # Linear pipeline only; EDA is optional and always available via Open EDA.
+        completed = {
+            "Load": bool(stage.get("loaded")),
+            "Cleaning": bool(stage.get("cleaned")),
+            "Feature Engineering": bool(stage.get("feature_engineered")),
+        }
+        steps = ["Load", "Cleaning", "Feature Engineering"]
+        # While on EDA, highlight the last workflow tab so pills stay meaningful.
+        highlight_tab = (
+            current_tab if current_tab != "EDA" else last_non_eda_tab_state.get()
+        )
+
+        pills = []
+        for idx, name in enumerate(steps, start=1):
+            classes = ["step-pill"]
+            prefix = f"{idx}. "
+            if completed[name]:
+                classes.append("done")
+                prefix = f"{idx}. [done] "
+            if highlight_tab == name:
+                classes.append("current")
+            pills.append(
+                ui.tags.span({"class": " ".join(classes)}, f"{prefix}{name}")
+            )
+
+        return ui.div({"class": "step-tracker"}, *pills)
+
+    @output
+    @render.ui
+    def workflow_top_right_control():
+        return ui.div(
+            {"class": "workflow-top-right"},
+            ui.input_action_button("workflow_open_eda_btn", "Open EDA", class_="btn btn-outline-primary btn-sm"),
+        )
+
+    @output
+    @render.ui
+    def workflow_bottom_nav():
+        try:
+            current_tab = input.main_nav()
+        except Exception:
+            current_tab = "Load"
+
+        back_label = "Back"
+        next_label = "Next"
+        if current_tab == "EDA":
+            back_label = "Return"
+            next_label = "Return"
+        return ui.div(
+            {"class": "workflow-footer-wrap"},
+            ui.div(
+                {"class": "workflow-bottom-nav"},
+                ui.input_action_button("workflow_prev_btn", back_label, class_="btn btn-outline-dark btn-sm"),
+                ui.input_action_button("workflow_next_btn", next_label, class_="btn btn-dark btn-sm"),
+            ),
+        )
+
+    @output
+    @render.ui
     def message_stack():
         messages = messages_state.get()
         if not messages:
@@ -2277,6 +2369,61 @@ def server(input, output, session):
                 item["text"],
             ) for item in messages],
         )
+
+    @output
+    @render.ui
+    def cleaning_context_banner():
+        stage = current_stage_state()
+        if stage.get("cleaned"):
+            return ui.div({"class": "alert alert-success py-2", "role": "status", "style": "margin-bottom: 12px;"},
+                          "You are working on a cleaned dataset lineage. Continue refining or move to feature engineering.")
+        if stage.get("loaded"):
+            return ui.div({"class": "alert alert-info py-2", "role": "status", "style": "margin-bottom: 12px;"},
+                          "You are cleaning raw data. Start with missing values or duplicates based on the Load overview section.")
+        return ui.div()
+
+    @output
+    @render.ui
+    def feature_unlock_banner():
+        stage = current_stage_state()
+        if not stage.get("loaded"):
+            return ui.div({"class": "alert alert-warning py-2", "role": "status", "style": "margin-bottom: 12px;"},
+                          "Load a dataset before applying feature transformations.")
+        if stage.get("cleaned"):
+            return ui.div()
+        return ui.div(
+            {"class": "alert alert-warning", "role": "status", "style": "margin-bottom: 12px;"},
+            ui.strong("You have not cleaned your data yet. "),
+            "Transforms may produce noisy results. ",
+            ui.input_action_link("feature_unlock_go_cleaning", "Go to Cleaning ->"),
+        )
+
+    @reactive.effect
+    @reactive.event(input.feature_unlock_go_cleaning)
+    def _on_feature_unlock_go_cleaning():
+        _select_main_tab("Cleaning")
+
+    @output
+    @render.ui
+    def eda_context_banner():
+        stage = current_stage_state()
+        if not stage.get("loaded"):
+            return ui.div({"class": "alert alert-warning py-2", "role": "status", "style": "margin-bottom: 12px;"},
+                          "Load a dataset to begin exploration.")
+        if stage.get("cleaned"):
+            return ui.div({"class": "alert alert-success py-2", "role": "status", "style": "margin-bottom: 12px;"},
+                          "You are exploring a cleaned version. Use these diagnostics to validate final quality.")
+        return ui.div(
+            {"class": "alert alert-info", "role": "status", "style": "margin-bottom: 12px;"},
+            ui.strong("You are exploring raw data. "),
+            "Anomalies may reflect issues to clean. ",
+            ui.input_action_link("eda_context_go_cleaning", "Go to Cleaning ->"),
+        )
+
+    @reactive.effect
+    @reactive.event(input.eda_context_go_cleaning)
+    def _on_eda_context_go_cleaning():
+        _select_main_tab("Cleaning")
 
     @output
     @render.ui
@@ -2362,6 +2509,81 @@ def server(input, output, session):
                 ui.tags.tbody(*rows_html),
             ),
         )
+
+    @output
+    @render.ui
+    def overview_priority_recommendation():
+        df = current_df()
+        if df is None:
+            return ui.div({"class": "small-note"}, "Load a dataset to get a recommended next step.")
+
+        n_rows = len(df)
+        n_missing = int(df.isna().sum().sum())
+        missing_pct = (100.0 * n_missing / (n_rows * len(df.columns))) if n_rows and len(df.columns) else 0.0
+
+        dup_df = cleaning.get_duplicates(df)
+        n_duplicates = len(dup_df)
+        duplicate_pct = (100.0 * n_duplicates / n_rows) if n_rows else 0.0
+
+        numeric_df = df.select_dtypes(include="number")
+        has_scale_signal = False
+        if not numeric_df.empty:
+            max_abs_means: list[float] = []
+            for col in numeric_df.columns:
+                series = numeric_df[col].dropna()
+                if series.empty:
+                    continue
+                max_abs_means.append(abs(float(series.mean())))
+            if len(max_abs_means) >= 2:
+                positive_means = [v for v in max_abs_means if v > 0]
+                if len(positive_means) >= 2:
+                    has_scale_signal = (max(positive_means) / min(positive_means)) >= 100
+
+        recommendation_title = "Suggested next step: validate in EDA"
+        recommendation_body = (
+            "No major data-quality flags were detected. Continue by exploring distributions "
+            "and relationships before deciding on additional transformations."
+        )
+        cta_label = "Open EDA"
+        cta_target = "EDA"
+
+        if n_missing > 0:
+            recommendation_title = "Suggested next step: address missing values first"
+            recommendation_body = (
+                f"Detected {n_missing:,} missing values ({missing_pct:.1f}% of all cells). "
+                "Handle missingness before feature engineering to avoid propagating bias."
+            )
+            cta_label = "Go to Cleaning - Handle missing values"
+            cta_target = "Cleaning"
+        elif n_duplicates > 0:
+            recommendation_title = "Suggested next step: remove duplicate rows"
+            recommendation_body = (
+                f"Detected {n_duplicates:,} duplicate rows ({duplicate_pct:.1f}% of rows). "
+                "Removing duplicates can prevent over-weighting repeated observations."
+            )
+            cta_label = "Go to Cleaning - Remove duplicates"
+            cta_target = "Cleaning"
+        elif has_scale_signal:
+            recommendation_title = "Suggested next step: review numeric scaling"
+            recommendation_body = (
+                "Numeric columns appear to be on very different scales. Consider scaling "
+                "before distance-based operations and model fitting."
+            )
+            cta_label = "Go to Cleaning - Scale numeric columns"
+            cta_target = "Cleaning"
+
+        overview_recommendation_target.set(cta_target)
+        return ui.div(
+            {"class": "alert alert-primary", "role": "status", "style": "margin-bottom: 12px;"},
+            ui.tags.div(ui.strong(recommendation_title)),
+            ui.tags.p({"class": "mb-2 mt-1"}, recommendation_body),
+            ui.input_action_link("overview_recommendation_cta", cta_label),
+        )
+
+    @reactive.effect
+    @reactive.event(input.overview_recommendation_cta)
+    def _on_overview_recommendation_cta_click():
+        _select_main_tab(overview_recommendation_target.get())
 
     @output
     @render.ui
@@ -2504,6 +2726,48 @@ def server(input, output, session):
     def cleaning_result_summary():
         text = cleaning_preview_meta.get()
         return ui.div({"class": "small-note"}, text or "Preview a cleaning action to see a summary.")
+
+    @output
+    @render.ui
+    def cleaning_whats_next():
+        items = cleaning_next_steps_state.get()
+        if not items:
+            return ui.div()
+        links = []
+        for idx, item in enumerate(items[:3], start=1):
+            links.append(
+                ui.tags.li(
+                    item["text"],
+                    " ",
+                    ui.input_action_link(f"cleaning_next_link_{idx}", f"Open {item['target']}"),
+                )
+            )
+        return ui.div(
+            {"class": "alert alert-primary mt-2 mb-0", "role": "status"},
+            ui.tags.div(ui.strong("What's next?")),
+            ui.tags.ul({"class": "mb-1 mt-2"}, *links),
+        )
+
+    @reactive.effect
+    @reactive.event(input.cleaning_next_link_1)
+    def _on_cleaning_next_link_1():
+        items = cleaning_next_steps_state.get()
+        if items:
+            _select_main_tab(items[0]["target"])
+
+    @reactive.effect
+    @reactive.event(input.cleaning_next_link_2)
+    def _on_cleaning_next_link_2():
+        items = cleaning_next_steps_state.get()
+        if len(items) >= 2:
+            _select_main_tab(items[1]["target"])
+
+    @reactive.effect
+    @reactive.event(input.cleaning_next_link_3)
+    def _on_cleaning_next_link_3():
+        items = cleaning_next_steps_state.get()
+        if len(items) >= 3:
+            _select_main_tab(items[2]["target"])
 
     @output
     @render.data_frame
