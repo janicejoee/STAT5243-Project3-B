@@ -49,6 +49,67 @@ _app_template = go.layout.Template(
 pio.templates["app_theme"] = _app_template
 pio.templates.default = "app_theme"
 
+# ---------------------------------------------------------------------------
+# Google Analytics 4 Configuration
+# ---------------------------------------------------------------------------
+GA_MEASUREMENT_ID = "G-D8T3NJKCNN"
+AB_VERSION = "B"
+
+ga_head_tags = ui.TagList(
+    ui.tags.script(
+        src=f"https://www.googletagmanager.com/gtag/js?id={GA_MEASUREMENT_ID}",
+        async_="",
+    ),
+    ui.tags.script(
+        f"""
+        window.dataLayer = window.dataLayer || [];
+        function gtag(){{ dataLayer.push(arguments); }}
+        gtag('js', new Date());
+        gtag('config', '{GA_MEASUREMENT_ID}');
+        gtag('set', 'user_properties', {{
+            ab_version: '{AB_VERSION}'
+        }});
+        """
+    ),
+    ui.tags.script(
+        """
+        $(document).on('shiny:inputchanged', function(event) {
+            if (event.name === 'main_nav') {
+                gtag('event', 'tab_switch', { 'tab_name': event.value });
+            }
+        });
+        $(document).on('click', '.btn-dark, .btn-outline-dark, .btn-outline-primary', function() {
+            gtag('event', 'button_click', { 'button_label': $(this).text().trim() });
+        });
+        var _tabEnterTime = Date.now(), _currentTab = '';
+        $(document).on('shiny:inputchanged', function(event) {
+            if (event.name === 'main_nav') {
+                var now = Date.now();
+                if (_currentTab) {
+                    gtag('event', 'tab_duration', {
+                        'tab_name': _currentTab,
+                        'duration_seconds': Math.round((now - _tabEnterTime) / 1000)
+                    });
+                }
+                _currentTab = event.value;
+                _tabEnterTime = now;
+            }
+        });
+        window._sessionStart = Date.now();
+        window.addEventListener('beforeunload', function() {
+            if (_currentTab) {
+                gtag('event', 'tab_duration', {
+                    'tab_name': _currentTab,
+                    'duration_seconds': Math.round((Date.now() - _tabEnterTime) / 1000)
+                });
+            }
+            gtag('event', 'session_duration', {
+                'total_seconds': Math.round((Date.now() - window._sessionStart) / 1000)
+            });
+        });
+        """
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1228,6 +1289,7 @@ app_ui = ui.page_navbar(
     theme=shinyswatch.theme.lux,
     fillable=False,
     header=ui.div(
+        ga_head_tags,
         ui.busy_indicators.use(),
         ui.tags.style(APP_CSS),
         ui.div(
